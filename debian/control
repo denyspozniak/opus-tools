@@ -1,0 +1,30 @@
+Source: opus-tools
+Section: sound
+Priority: optional
+Maintainer: Denys Pozniak <denys.pozniak@gmail.com>
+Build-Depends: debhelper-compat (= 13),
+               pkg-config,
+               libogg-dev,
+               libopus-dev,
+               libopusenc-dev,
+               libopusfile-dev,
+               libflac-dev,
+               libpcap-dev,
+               libssl-dev
+Standards-Version: 4.6.2
+Homepage: https://github.com/denyspozniak/opus-tools
+Rules-Requires-Root: no
+
+Package: opus-tools
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: Opus codec command line tools, built from upstream master
+ The Xiph.Org reference tools for Ogg Opus, built from git master of
+ https://gitlab.xiph.org/xiph/opus-tools rather than the 2018 v0.2 release:
+  * opusenc  - encode WAV, AIFF, FLAC or raw PCM to Ogg Opus;
+  * opusdec  - decode Ogg Opus to WAV or raw PCM, or play it;
+  * opusinfo - inspect and validate Ogg Opus files;
+  * opusrtp  - send Ogg Opus as RTP, or extract Opus RTP from a live
+               interface or a pcap file into a playable file.
+ .
+ Unlike the distribution package, this one includes opusrtp.

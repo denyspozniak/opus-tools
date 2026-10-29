@@ -47,6 +47,8 @@ $ opusdec caller.opus caller.wav
 
 - [Why this fork exists](#why-this-fork-exists)
 - [Install](#install)
+  - [From this fork's releases](#from-this-forks-releases)
+  - [From your distribution](#from-your-distribution)
 - [Build from source](#build-from-source)
 - [Usage](#usage)
   - [opusenc](#opusenc)
@@ -55,6 +57,7 @@ $ opusdec caller.opus caller.wav
   - [opusrtp](#opusrtp)
 - [opusrtp and real captures](#opusrtp-and-real-captures)
 - [Tests](#tests)
+- [Releases](#releases)
 - [Keeping in sync with upstream](#keeping-in-sync-with-upstream)
 - [Credits](#credits)
 - [Maintenance and AI assistance](#maintenance-and-ai-assistance)
@@ -79,10 +82,14 @@ So anything merged after 2018 — the QEXT controls, the larger frame sizes, the
 C23 and autoconf fixes — only exists if you build from master. Those packages
 also leave out `opusrtp` entirely (see [below](#opusrtp)).
 
-This fork is my working copy of upstream master: a place to build, test and
-carry notes on it. **Right now its code is identical to upstream** — this
-README is the only difference. Upstream's own one-paragraph README is replaced
-by this one; everything under `src/`, `man/` and the build system is untouched.
+This fork builds upstream master into installable packages and publishes them
+on every push. **Its code is identical to upstream.** The fork adds only:
+
+- `debian/` — packaging, which also installs `opusrtp`;
+- `.github/workflows/release.yml` — the build and release pipeline;
+- this README, replacing upstream's one-paragraph one.
+
+Everything under `src/`, `man/` and the build system is untouched.
 
 Lineage:
 
@@ -94,6 +101,36 @@ gitlab.xiph.org/xiph/opus-tools  (canonical, Xiph.Org Foundation)
 
 ## Install
 
+### From this fork's releases
+
+Every push to master that changes code produces a
+[release](https://github.com/denyspozniak/opus-tools/releases) with `.deb`
+packages built from that commit:
+
+| File | Target |
+| --- | --- |
+| `opus-tools_<ver>.debian12_amd64.deb` | Debian 12 (bookworm) |
+| `opus-tools_<ver>.debian13_amd64.deb` | Debian 13 (trixie) |
+| `opus-tools_<ver>.ubuntu2404_amd64.deb` | Ubuntu 24.04 LTS |
+| `opus-tools_<ver>.ubuntu2604_amd64.deb` | Ubuntu 26.04 LTS |
+| `opus-tools-<describe>.tar.gz` | source tarball from `make distcheck` |
+
+```bash
+# pick the file matching your distribution from the latest release
+sudo apt install ./opus-tools_0.2.git54.g1234567.ubuntu2404_amd64.deb
+opusenc --version
+sha256sum -c SHA256SUMS     # optional, with SHA256SUMS from the same release
+```
+
+The package replaces the distribution's `opus-tools` and adds `opusrtp`. To go
+back: `sudo apt remove opus-tools && sudo apt install opus-tools`.
+
+Ubuntu 22.04 is not built: it has no `libopusenc` package. All builds use the
+distribution's own libopus, and none of those is compiled with QEXT, so the
+QEXT control is accepted by `opusenc` but rejected by the library.
+
+### From your distribution
+
 Distribution packages give you 0.2 — on Debian and Ubuntu without `opusrtp`.
 That is fine for plain encoding and decoding:
 
@@ -102,8 +139,6 @@ sudo apt install opus-tools      # Debian / Ubuntu
 sudo dnf install opus-tools      # Fedora / RHEL-likes
 brew install opus-tools          # macOS
 ```
-
-If you need anything newer, or `opusrtp`, build from source.
 
 ## Build from source
 
@@ -277,20 +312,45 @@ make distcheck   # also checks the release tarball builds
 ```
 
 Upstream CI ([`.gitlab-ci.yml`](.gitlab-ci.yml)) builds on Debian 12 with
-autotools and runs both targets. This fork adds no CI of its own.
+autotools and runs both targets. On GitHub, the release pipeline below runs
+`make check` inside every package build and `make distcheck` for the tarball.
+
+## Releases
+
+There is no manual release step. [`release.yml`](.github/workflows/release.yml)
+runs on every push to master — documentation-only pushes excepted — and can be
+started by hand from the Actions tab:
+
+1. **Version** from `git describe`, the same lookup upstream's
+   `update_version` does: `0.2-54-g1234567` becomes `0.2+git54.g1234567`. The
+   commit count keeps successive builds in order for `apt`, and `+git` sorts
+   above the distributions' plain `0.2`. Each `.deb` gets a `~<dist>` suffix.
+2. **Packages** for Debian 12/13 and Ubuntu 24.04/26.04, each built in its
+   own container with `dpkg-buildpackage`, then installed and smoke-tested:
+   all four tools present, `opusenc --version` matching the commit, and a round
+   trip through `opusenc` → `opusinfo` → `opusdec`.
+3. **Source tarball** from `make distcheck`.
+4. **Release** tagged with the version (no `v` prefix, so it can never be
+   picked up by `update_version`), with install and usage notes, the upstream
+   commit it is based on, and `SHA256SUMS`. Re-running the same commit
+   refreshes that release instead of failing.
+
+If the repository was created with GitHub's *Fork* button, Actions are off by
+default: enable them once under the repository's **Actions** tab.
 
 ## Keeping in sync with upstream
 
 ```bash
 git remote add upstream https://gitlab.xiph.org/xiph/opus-tools.git
 git fetch upstream
-git merge --ff-only upstream/master
+git merge upstream/master
 git push origin master
 ```
 
-`--ff-only` keeps it honest: as long as this fork has no code of its own, the
-merge either fast-forwards or something unexpected has happened. A conflict in
-this README is the only one expected.
+A plain merge, not `--ff-only`: the fork carries its own commits (packaging,
+workflow, README), so it cannot fast-forward. Upstream has no `debian/` or
+`.github/workflows/`, so the only conflict to expect is in `README.md` — keep
+this fork's version. The push then builds and releases the new upstream code.
 
 ## Credits
 
@@ -320,8 +380,12 @@ built binaries, distribution versions were read from the package archives, and
 every row in the [opusrtp table](#opusrtp-and-real-captures) was reproduced
 with a pcap.
 
-No code in this fork has been changed. If that ever changes, the change will
-be listed here and offered upstream first.
+The Debian packaging and the release workflow were written the same way, and
+the package build was run in containers for all four target distributions,
+with the install test, before it was committed.
+
+No upstream code in this fork has been changed. If that ever changes, the
+change will be listed here and offered upstream first.
 
 ## License
 

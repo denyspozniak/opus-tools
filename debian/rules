@@ -1,0 +1,12 @@
+#!/usr/bin/make -f
+
+export DEB_BUILD_MAINT_OPTIONS = hardening=+all
+
+%:
+	dh $@
+
+# Upstream builds opusrtp as noinst_PROGRAMS, so "make install" skips it; it
+# is the main reason this package exists. Its man page goes via .manpages.
+override_dh_auto_install:
+	dh_auto_install
+	install -D -m 0755 opusrtp debian/opus-tools/usr/bin/opusrtp

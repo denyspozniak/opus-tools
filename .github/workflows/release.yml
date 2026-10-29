@@ -1,0 +1,332 @@
+name: release
+
+# Every push to master that touches code becomes a downloadable release:
+# .deb packages for each supported distribution plus the source tarball.
+# There is no manual tagging step; the version is derived from git.
+on:
+  push:
+    branches: [master]
+    paths-ignore:
+      - '**.md'
+      - '.github/assets/**'
+  workflow_dispatch:
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  version:
+    name: resolve version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      describe: ${{ steps.v.outputs.describe }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - id: v
+        name: Derive the version from git describe
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Same lookup upstream's update_version does, so the package version
+          # and "opusenc --version" are built from the same string.
+          describe=$(git describe --tags --match 'v*')
+          describe=${describe#v}
+          # 0.2-53-g754ccff -> 0.2+git53.g754ccff: "+" sorts above the plain
+          # upstream release, and the commit count keeps successive builds in
+          # order for dpkg. A build exactly on an upstream tag is just "0.2".
+          if [[ "${describe}" =~ ^(.+)-([0-9]+)-(g[0-9a-f]+)$ ]]; then
+            version="${BASH_REMATCH[1]}+git${BASH_REMATCH[2]}.${BASH_REMATCH[3]}"
+          else
+            version="${describe}"
+          fi
+          echo "describe=${describe}" >> "$GITHUB_OUTPUT"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "version ${version} (git describe: ${describe})"
+
+  deb:
+    name: deb (${{ matrix.dist }})
+    needs: version
+    runs-on: ubuntu-latest
+    container: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: debian:12
+            dist: debian12
+          - image: debian:trixie
+            dist: debian13
+          # Ubuntu 22.04 is left out: it has no libopusenc-dev package.
+          - image: ubuntu:24.04
+            dist: ubuntu2404
+          - image: ubuntu:26.04
+            dist: ubuntu2604
+    steps:
+      - name: Install build dependencies
+        run: |
+          set -eux
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential debhelper devscripts fakeroot lintian \
+            autoconf automake libtool pkg-config \
+            libogg-dev libopus-dev libopusenc-dev libopusfile-dev \
+            libflac-dev libpcap-dev libssl-dev ca-certificates git
+
+      # git must exist before checkout, otherwise the action falls back to a
+      # tarball download with no history and update_version reports "unknown".
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Stamp the changelog with a distribution-specific version
+        shell: bash
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          DIST: ${{ matrix.dist }}
+          DEBEMAIL: denys.pozniak@gmail.com
+          DEBFULLNAME: Denys Pozniak
+        run: |
+          set -euo pipefail
+          # The container runs as root over a workspace owned by the runner
+          # user; without this git refuses to work and the version is lost.
+          git config --global --add safe.directory "${GITHUB_WORKSPACE}"
+          # "~" sorts before everything, so 0.2+git53.g754ccff~debian13 is
+          # older than 0.2+git53.g754ccff: a distro build never shadows it.
+          dch --newversion "${VERSION}~${DIST}" --distribution unstable \
+              --force-bad-version "Automated build of ${VERSION} for ${DIST}."
+          # update_version runs "git describe --dirty"; hide the stamped
+          # changelog from it or every binary reports a "-dirty" version.
+          git update-index --assume-unchanged debian/changelog
+          head -5 debian/changelog
+
+      - name: Build the package
+        run: dpkg-buildpackage -us -uc -b
+
+      - name: Inspect and install-test the result
+        shell: bash
+        env:
+          DESCRIBE: ${{ needs.version.outputs.describe }}
+        run: |
+          set -euxo pipefail
+          mkdir -p out
+          mv ../*.deb out/
+          for f in out/*.deb; do
+            echo "=== ${f}"
+            dpkg-deb --info "${f}"
+            dpkg-deb --contents "${f}"
+          done
+          # lintian is advisory: a cosmetic tag should not block a build.
+          lintian --no-tag-display-limit out/*.deb || true
+          apt-get install -y ./out/opus-tools_*.deb
+          for t in opusenc opusdec opusinfo opusrtp; do
+            test -x "/usr/bin/${t}"
+            # Checked in the package, not on disk: Ubuntu container images
+            # drop /usr/share/man at install time.
+            dpkg-deb --contents out/opus-tools_*.deb | grep -q "man1/${t}.1.gz"
+          done
+          opusenc --version | tee /dev/stderr | grep -F "opus-tools ${DESCRIBE} "
+          # Round trip one second of noise through every tool.
+          head -c 192000 /dev/urandom > in.raw
+          opusenc --quiet --raw in.raw t.opus
+          opusinfo t.opus
+          opusdec --quiet t.opus t.wav
+          test -s t.wav
+          opusrtp --help
+          rm -f in.raw t.opus t.wav
+          apt-get remove -y opus-tools
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: deb-${{ matrix.dist }}
+          path: out/*.deb
+          if-no-files-found: error
+
+  tarball:
+    name: source tarball
+    needs: version
+    runs-on: ubuntu-latest
+    container: debian:trixie
+    steps:
+      - name: Install build dependencies
+        run: |
+          set -eux
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential autoconf automake libtool pkg-config xz-utils zip \
+            libogg-dev libopus-dev libopusenc-dev libopusfile-dev \
+            libflac-dev libpcap-dev libssl-dev ca-certificates git
+
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      # make distcheck builds and tests the tarball it produces, so what gets
+      # published is known to configure and build on its own.
+      - name: Create and check the release tarball
+        run: |
+          set -euxo pipefail
+          git config --global --add safe.directory "${GITHUB_WORKSPACE}"
+          ./autogen.sh
+          ./configure
+          make distcheck
+          mkdir -p out
+          mv opus-tools-*.tar.gz out/
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: source-tarball
+          path: out/*.tar.gz
+          if-no-files-found: error
+
+  publish:
+    name: publish release
+    needs: [version, deb, tarball]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+
+      - name: Collect, rename and checksum the artifacts
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p dist
+          # Debug symbols are not published: Debian emits .deb for them while
+          # Ubuntu emits .ddeb, so the release would be lopsided for no gain.
+          find artifacts -type f \( -name '*.deb' -o -name '*.tar.gz' \) \
+            ! -name '*-dbgsym_*' -exec mv {} dist/ \;
+          cd dist
+          # GitHub rewrites "~" (and other special characters) to "." in asset
+          # names. Rename first so SHA256SUMS matches the downloaded files.
+          for f in *; do
+            g=${f//\~/.}
+            g=${g//+/.}
+            [ "${f}" = "${g}" ] || mv -- "${f}" "${g}"
+          done
+          sha256sum -- * > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Find the upstream commit this build is based on
+        id: upstream
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The read-only GitHub mirror; gitlab.xiph.org is the canonical
+          # repository but times out often enough to make a build flaky.
+          git fetch --quiet https://github.com/xiph/opus-tools.git master
+          base=$(git merge-base HEAD FETCH_HEAD)
+          {
+            echo "sha=$(git rev-parse --short=7 "${base}")"
+            echo "date=$(git log -1 --format=%cs "${base}")"
+            echo "subject=$(git log -1 --format=%s "${base}")"
+            echo "fork_commits=$(git rev-list --count "${base}..HEAD")"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Publish the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.version.outputs.version }}
+          DESCRIBE: ${{ needs.version.outputs.describe }}
+          UP_SHA: ${{ steps.upstream.outputs.sha }}
+          UP_DATE: ${{ steps.upstream.outputs.date }}
+          UP_SUBJECT: ${{ steps.upstream.outputs.subject }}
+          FORK_COMMITS: ${{ steps.upstream.outputs.fork_commits }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Tags deliberately have no "v" prefix: upstream's update_version
+          # describes against 'v*' tags, and these must not become the base
+          # of the next build's version.
+          tag="${VERSION}"
+          v=${VERSION//+/.}
+          target() {
+            case "$1" in
+              *debian12*)   echo "Debian 12 (bookworm)" ;;
+              *debian13*)   echo "Debian 13 (trixie)" ;;
+              *ubuntu2204*) echo "Ubuntu 22.04 LTS" ;;
+              *ubuntu2404*) echo "Ubuntu 24.04 LTS" ;;
+              *ubuntu2604*) echo "Ubuntu 26.04 LTS" ;;
+              *.tar.gz)     echo "source (\`./configure && make\`)" ;;
+            esac
+          }
+          notes=$(mktemp)
+          {
+            echo "Automated build of [denyspozniak/opus-tools](https://github.com/${GITHUB_REPOSITORY}) at \`${GITHUB_SHA::7}\`."
+            echo
+            echo "**The code is Xiph.Org's.** This build is upstream master at"
+            echo "[\`${UP_SHA}\`](https://gitlab.xiph.org/xiph/opus-tools/-/commit/${UP_SHA}) (${UP_DATE}, \"${UP_SUBJECT}\")"
+            echo "plus ${FORK_COMMITS} fork commit(s), which only add packaging and documentation."
+            echo "Canonical source: https://gitlab.xiph.org/xiph/opus-tools"
+            echo
+            echo "\`opusenc --version\` reports \`opus-tools ${DESCRIBE}\`."
+            echo
+            echo "### Install"
+            echo
+            echo "Download the package for your distribution, then:"
+            echo
+            echo '```bash'
+            echo "sudo apt install ./opus-tools_${v}.ubuntu2404_amd64.deb   # pick your file"
+            echo "opusenc --version"
+            echo '```'
+            echo
+            echo "It replaces the distribution's \`opus-tools\` 0.2 package and adds \`opusrtp\`,"
+            echo "which the distribution package does not ship. To go back to the distribution build:"
+            echo "\`sudo apt remove opus-tools && sudo apt install opus-tools\`."
+            echo
+            echo "### Use"
+            echo
+            echo '```bash'
+            echo "opusenc input.wav output.opus                         # encode"
+            echo "opusenc --downmix-mono --speech --bitrate 24 in.wav out.opus"
+            echo "opusdec output.opus decoded.wav                       # decode"
+            echo "opusinfo output.opus                                  # inspect"
+            echo "opusrtp --extract call.pcap --port 30000 -o leg.opus  # Opus RTP from a capture"
+            echo '```'
+            echo
+            echo "Captures for \`opusrtp\` taken with \`tcpdump -i any\` need \`-y LINUX_SLL\`; see the"
+            echo "[README](https://github.com/${GITHUB_REPOSITORY}#opusrtp-and-real-captures) for this and other pitfalls."
+            echo
+            echo "### Files"
+            echo
+            echo "| File | Target |"
+            echo "| --- | --- |"
+            for f in dist/*; do
+              n=${f#dist/}
+              [ "${n}" = SHA256SUMS ] && continue
+              echo "| \`${n}\` | $(target "${n}") |"
+            done
+            echo
+            echo "Built against each distribution's own libopus (1.3.1 to 1.6.1). None of them is compiled"
+            echo "with QEXT, so \`--set-ctl-int 4056=1\` fails with \"request not implemented\"."
+            echo "Verify downloads with \`sha256sum -c SHA256SUMS\`."
+          } > "${notes}"
+          cat "${notes}"
+          if gh release view "${tag}" > /dev/null 2>&1; then
+            # Re-run of the same commit: refresh the assets in place.
+            gh release upload "${tag}" dist/* --clobber
+            gh release edit "${tag}" --notes-file "${notes}"
+          else
+            gh release create "${tag}" \
+              --target "${GITHUB_SHA}" \
+              --title "opus-tools ${VERSION}" \
+              --notes-file "${notes}" \
+              --latest \
+              dist/*
+          fi

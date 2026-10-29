@@ -1,0 +1,6 @@
+opus-tools (0.2) unstable; urgency=medium
+
+  * Debian packaging for the denyspozniak/opus-tools fork. CI replaces this
+    entry with the version of each build.
+
+ -- Denys Pozniak <denys.pozniak@gmail.com>  Thu, 29 Oct 2026 10:47:56 +0100
