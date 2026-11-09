@@ -506,26 +506,22 @@ int parse_rtp_header(const unsigned char *packet, int size, rtp_header *rtp)
   rtp->version = (packet[0] >> 6) & 3;
   rtp->pad = (packet[0] >> 5) & 1;
   rtp->ext = (packet[0] >> 4) & 1;
-  rtp->cc = packet[0] & 7;
-  rtp->header_size = 12 + 4 * rtp->cc;
-  if (rtp->ext == 1) {
-    uint16_t ext_length;
-    rtp->header_size += 4;
-    ext_length = rbe16(packet + rtp->header_size - 2);
-    rtp->header_size += ext_length * 4;
-  }
-  rtp->payload_size = size - rtp->header_size;
-
+  rtp->cc = packet[0] & 15;
   rtp->mark = (packet[1] >> 7) & 1;
-  rtp->type = (packet[1]) & 127;
+  rtp->type = packet[1] & 127;
   rtp->seq  = rbe16(packet + 2);
   rtp->time = rbe32(packet + 4);
   rtp->ssrc = rbe32(packet + 8);
   rtp->csrc = NULL;
+  rtp->header_size = 12 + 4 * rtp->cc + 4 * rtp->ext;
+  if (rtp->ext && size >= rtp->header_size) {
+    rtp->header_size += 4 * rbe16(packet + rtp->header_size - 2);
+  }
   if (size < rtp->header_size) {
     fprintf(stderr, "Packet too short for RTP header\n");
     return -1;
   }
+  rtp->payload_size = size - rtp->header_size;
 
   return 0;
 }
@@ -548,7 +544,7 @@ int serialize_rtp_header(unsigned char *packet, int size, rtp_header *rtp)
   packet[0] = ((rtp->version & 3) << 6) |
               ((rtp->pad & 1) << 5) |
               ((rtp->ext & 1) << 4) |
-              ((rtp->cc & 7));
+              ((rtp->cc & 15));
   packet[1] = ((rtp->mark & 1) << 7) |
               ((rtp->type & 127));
   be16(packet+2, rtp->seq);
@@ -1098,6 +1094,7 @@ int sniff(const char *input_file, const char *device, const char *output_file,
   pcap_t *pcap;
   char errbuf[PCAP_ERRBUF_SIZE];
   ogg_packet *op;
+  int ret;
 
   /* set up */
   if (input_file) {
@@ -1168,7 +1165,10 @@ int sniff(const char *input_file, const char *device, const char *output_file,
 
   /* start capture loop */
   /* if reading from an input file, continue until EOF */
-  pcap_loop(pcap, input_file ? 0 : 300, write_packet, (u_char *)params);
+  ret = pcap_loop(pcap, input_file ? 0 : 300, write_packet, (u_char *)params);
+  if (ret == -1) {
+    pcap_perror(pcap, "Packet processing failed");
+  }
 
   /* write outstanding data */
   if (params->out) {
@@ -1185,7 +1185,7 @@ int sniff(const char *input_file, const char *device, const char *output_file,
   ogg_stream_destroy(params->stream);
   free(params);
   pcap_close(pcap);
-  return 0;
+  return ret == -1 ? 1 : 0;
 }
 #endif /* HAVE_PCAP */
 
