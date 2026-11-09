@@ -68,7 +68,7 @@ $ opusdec caller.opus caller.wav
 ## Why this fork exists
 
 opus-tools is not abandoned, but its releases are. The last tag, **v0.2, was cut
-on 2018-09-18**. Master has moved on by 52 commits since, most of them in a
+on 2018-09-18**. Master has moved on a long way since, most of it in a
 burst of maintenance in early 2026 — and every Linux distribution still ships
 0.2:
 
